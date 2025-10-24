@@ -1,75 +1,152 @@
 from mcp.server.fastmcp import FastMCP
 import os
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+import os.path
+import pickle
+
+# Scopes required for read-only access to Google Drive
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+
+def authenticate_google_drive():
+    """
+    Authenticate with Google Drive API.
+    Returns the Drive service object.
+    """
+    creds = None
+    
+    # Token file stores the user's access and refresh tokens
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    
+    # If no valid credentials, let user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        # Save credentials for next run
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    
+    service = build('drive', 'v3', credentials=creds)
+    return service
+
+def find_folder_id(service, folder_name):
+    """
+    Find the folder ID by folder name.
+    """
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    results = service.files().list(q=query, fields="files(id, name)").execute()
+    folders = results.get('files', [])
+    
+    if not folders:
+        return None
+    return folders[0]['id']
+
+def list_files_in_folder(folder_name='PatientRecord'):
+    """
+    List all files in the specified Google Drive folder.
+    
+    Args:
+        folder_name (str): Name of the folder to search for (default: 'PatientRecord')
+    
+    Returns:
+        list: List of dictionaries containing file information
+    """
+    try:
+        # Authenticate and get service
+        service = authenticate_google_drive()
+        
+        # Find the folder ID
+        folder_id = find_folder_id(service, folder_name)
+        
+        if not folder_id:
+            print(f"Folder '{folder_name}' not found in your Google Drive.")
+            return []
+        
+        # Query for all files in the folder
+        query = f"'{folder_id}' in parents and trashed=false"
+        results = service.files().list(
+            q=query,
+            pageSize=1000,
+            fields="nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)"
+        ).execute()
+        
+        files = results.get('files', [])
+        
+        if not files:
+            print(f"No files found in '{folder_name}' folder.")
+            return []
+        
+        print(f"\nFiles in '{folder_name}' folder:")
+        print("-" * 80)
+        
+        file_list = []
+        for i, file in enumerate(files, 1):
+            file_info = {
+                'id': file['id'],
+                'name': file['name'],
+                'mimeType': file['mimeType'],
+                'size': file.get('size', 'N/A'),
+                'modifiedTime': file['modifiedTime'],
+                'webViewLink': file.get('webViewLink', 'N/A')
+            }
+            file_list.append(file_info)
+            
+            print(f"{i}. {file['name']}")
+            print(f"   Type: {file['mimeType']}")
+            print(f"   Size: {file.get('size', 'N/A')} bytes")
+            print(f"   Modified: {file['modifiedTime']}")
+            print(f"   Link: {file.get('webViewLink', 'N/A')}")
+            print()
+        
+        return file_list
+    
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        return []
+
+# Usage example
+if __name__ == "__main__":
+    files = list_files_in_folder('PatientRecords')
+    print(f"\nTotal files found: {len(files)}")
 
 # Create an MCP server
-mcp = FastMCP("AI Sticky Notes")
+# mcp = FastMCP("CareHealthAI")
 
-NOTES_FILE = os.path.join(os.path.dirname(__file__), "notes.txt")
+# @mcp.tool()
+# def add_note(message: str) -> str:
+#     """
+#     Append a new note to the sticky note file.
 
-def ensure_file():
-    if not os.path.exists(NOTES_FILE):
-        with open(NOTES_FILE, "w") as f:
-            f.write("")
+#     Args:
+#         message (str): The note content to be added.
 
-@mcp.tool()
-def add_note(message: str) -> str:
-    """
-    Append a new note to the sticky note file.
+#     Returns:
+#         str: Confirmation message indicating the note was saved.
+#     """
+#     ensure_file()
+#     with open(NOTES_FILE, "a") as f:
+#         f.write(message + "\n")
+#     return "Note saved!"
 
-    Args:
-        message (str): The note content to be added.
+# @mcp.tool()
+# def read_pdfs() -> str:
+#     """
+#     Read and return all notes from the sticky note file.
 
-    Returns:
-        str: Confirmation message indicating the note was saved.
-    """
-    ensure_file()
-    with open(NOTES_FILE, "a") as f:
-        f.write(message + "\n")
-    return "Note saved!"
-
-@mcp.tool()
-def read_notes() -> str:
-    """
-    Read and return all notes from the sticky note file.
-
-    Returns:
-        str: All notes as a single string separated by line breaks.
-             If no notes exist, a default message is returned.
-    """
-    ensure_file()
-    with open(NOTES_FILE, "r") as f:
-        content = f.read().strip()
-    return content or "No notes yet."
-
-@mcp.resource("notes://latest")
-def get_latest_note() -> str:
-    """
-    Get the most recently added note from the sticky note file.
-
-    Returns:
-        str: The last note entry. If no notes exist, a default message is returned.
-    """
-    ensure_file()
-    with open(NOTES_FILE, "r") as f:
-        lines = f.readlines()
-    return lines[-1].strip() if lines else "No notes yet."
-
-@mcp.prompt()
-def note_summary_prompt() -> str:
-    """
-    Generate a prompt asking the AI to summarize all current notes.
-
-    Returns:
-        str: A prompt string that includes all notes and asks for a summary.
-             If no notes exist, a message will be shown indicating that.
-    """
-    ensure_file()
-    with open(NOTES_FILE, "r") as f:
-        content = f.read().strip()
-    if not content:
-        return "There are no notes yet."
-
-    return f"Summarize the current notes: {content}"
+#     Returns:
+#         str: All notes as a single string separated by line breaks.
+#              If no notes exist, a default message is returned.
+#     """
+    
 
 # from mcp.server.fastmcp import FastMCP
 # from typing import List, Dict, Optional
@@ -241,7 +318,7 @@ def note_summary_prompt() -> str:
 #     except Exception as e:
 #         return f"Error retrieving lab results: {str(e)}"
 
-# # Resource: Greeting
+# Resource: Greeting
 # @mcp.resource("greeting://{name}")
 # def get_greeting(name: str) -> str:
 #     """Get a personalized greeting"""
